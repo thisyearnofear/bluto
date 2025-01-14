@@ -18,7 +18,7 @@ const config = createConfig(
     walletConnectProjectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID!,
 
     // Required App Info
-    appName: "Superfluid Demo",
+    appName: "Bluto",
 
     // Optional App Info
     appDescription: "Superfluid streaming demo on Base Sepolia",

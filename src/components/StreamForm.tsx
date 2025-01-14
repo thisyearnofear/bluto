@@ -8,6 +8,7 @@ import { CFA_FORWARDER_ABI } from "@/constants/abis/CFAForwarder";
 import { ETHx_ABI } from "@/constants/abis/ETHx";
 import { FlowRateInput } from "./FlowRateInput";
 import { ReceiverSearch } from "./ReceiverSearch";
+import { InfoTooltip } from "./InfoTooltip";
 
 export function StreamForm() {
   const { address, isConnected } = useAccount();
@@ -16,9 +17,20 @@ export function StreamForm() {
   const [message, setMessage] = useState<string>("");
   const [txHash, setTxHash] = useState<string>("");
   const { data: walletClient } = useWalletClient();
+  const [copied, setCopied] = useState(false);
 
   const handleReceiverAddressChange = (e: ChangeEvent<HTMLInputElement>) =>
     setReceiverAddress(e.target.value);
+
+  const handleCopyAddress = async () => {
+    try {
+      await navigator.clipboard.writeText(CONTRACTS.ETHx);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy:", err);
+    }
+  };
 
   const createStream = async () => {
     if (!isConnected || !walletClient) {
@@ -147,13 +159,41 @@ export function StreamForm() {
   if (!isConnected) return null;
 
   return (
-    <div className="stream-form">
-      <input
-        placeholder="Token Address (ETHx)"
-        value={CONTRACTS.ETHx}
-        disabled
-        style={{ width: "100%", padding: "10px", margin: "10px 0" }}
-      />
+    <div className="stream-form" style={{ padding: "0 10px" }}>
+      <div style={{ marginBottom: "clamp(15px, 3vh, 20px)" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "8px",
+          }}
+        >
+          <span style={{ opacity: 0.7 }}>Token:</span>
+          <button
+            onClick={handleCopyAddress}
+            style={{
+              padding: "10px",
+              textAlign: "center",
+              backgroundColor: "#f5f5f5",
+              border: "none",
+              borderRadius: "4px",
+              color: "#666",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+            }}
+          >
+            ETHx
+            {copied ? (
+              <span style={{ fontSize: "12px", color: "green" }}>✓</span>
+            ) : (
+              <span style={{ fontSize: "12px", opacity: 0.5 }}>📋</span>
+            )}
+          </button>
+        </div>
+      </div>
 
       <h2 style={{ fontSize: "20px", fontWeight: "bold" }}>Create Stream</h2>
 
@@ -168,11 +208,12 @@ export function StreamForm() {
         style={{
           backgroundColor: "green",
           color: "white",
-          padding: "10px",
+          padding: "clamp(8px, 2vh, 12px)",
           borderRadius: "5px",
           border: "none",
           cursor: "pointer",
           width: "100%",
+          fontSize: "clamp(14px, 4vw, 16px)",
         }}
       >
         Create Stream

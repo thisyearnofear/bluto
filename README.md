@@ -1,36 +1,155 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Superfluid Streaming App
 
-## Getting Started
+A simple dApp for creating token streams on Base Sepolia using Superfluid.
 
-First, run the development server:
+## Overview
+
+This app demonstrates how to create token streams using Superfluid's CFA (Constant Flow Agreement) Forwarder on Base Sepolia. Users can stream ETHx (Super Token version of ETH) to any address at a minimum flow rate.
+
+## Technical Details
+
+### Key Contracts
+
+- ETHx Token: `0x143ea239159155b408e71cdbe836e8cfd6766732`
+- CFA Forwarder: `0xcfA132E353cB4E398080B9700609bb008eceB125`
+
+### Flow Rate
+
+- Minimum flow rate: `385802469135` wei/second
+- This equals approximately 0.01 tokens per month
+
+### Buffer Requirements
+
+- Each stream requires a buffer amount
+- Current buffer requirement: ~0.00139 ETHx
+- User must have more ETHx than the buffer amount
+
+## Setup
+
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Create a `.env.local` file with:
+
+```
+NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=your_project_id
+NEXT_PUBLIC_ETHX_ADDRESS=0x143ea239159155b408e71cdbe836e8cfd6766732
+```
+
+3. Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Dependencies
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Core Dependencies
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```json
+{
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "next": "14.0.4",
+    "@tanstack/react-query": "^5.0.0",
+    "connectkit": "^1.8.2",
+    "wagmi": "^2.0.0",
+    "viem": "^2.0.0",
+    "ethers": "^5.7.2"
+  }
+}
+```
 
-## Learn More
+### Network Configuration
 
-To learn more about Next.js, take a look at the following resources:
+Base Sepolia testnet details:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- Chain ID: 84532
+- RPC URL: https://sepolia.base.org
+- Block Explorer: https://sepolia.basescan.org
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Features
 
-## Deploy on Vercel
+### Wallet Connection
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- Uses ConnectKit for wallet management
+- Automatically handles network switching to Base Sepolia
+- Supports multiple wallet providers
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### Stream Creation
+
+1. Checks if user has sufficient ETHx balance
+2. Verifies buffer amount requirements
+3. Creates stream using `setFlowrate` function
+4. Minimum flow rate enforced to prevent failed transactions
+
+### Error Handling
+
+- Network validation
+- Balance checks
+- Transaction status monitoring
+- Detailed error messages
+
+## Smart Contract Integration
+
+### CFA Forwarder ABI
+
+Key functions used:
+
+```typescript
+const CFAv1ForwarderABI = [
+  {
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "receiver", type: "address" },
+      { name: "flowrate", type: "int96" },
+    ],
+    name: "setFlowrate",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "flowrate", type: "int96" },
+    ],
+    name: "getBufferAmountByFlowrate",
+    outputs: [{ name: "bufferAmount", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+];
+```
+
+## Testing
+
+To test the app:
+
+1. Get Base Sepolia ETH from the faucet
+2. Wrap ETH to ETHx using Superfluid Dashboard
+3. Ensure you have more than the required buffer amount
+4. Enter recipient address and create stream
+
+## Common Issues
+
+1. Insufficient ETHx Balance
+
+   - Solution: Wrap more ETH to ETHx
+
+2. Network Connection
+
+   - Solution: Ensure wallet is connected to Base Sepolia
+
+3. Flow Rate Errors
+   - Solution: Use the minimum flow rate of 385802469135 wei/second
+
+## Resources
+
+- [Superfluid Docs](https://docs.superfluid.finance/)
+- [Base Sepolia Faucet](https://www.coinbase.com/faucets/base-sepolia-faucet)
+- [Superfluid Dashboard](https://app.superfluid.finance/)

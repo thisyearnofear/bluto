@@ -3,9 +3,9 @@
 import { ConnectKitButton } from "connectkit";
 import { StreamForm } from "@/components/StreamForm";
 import { Footer } from "@/components/Footer";
-import { TokenFlow } from "@/components/TokenFlow";
+import { StreamList } from "@/components/StreamList";
 
-export default function BlutoApp() {
+export default function Home() {
   return (
     <div
       style={{
@@ -64,13 +64,7 @@ export default function BlutoApp() {
       </div>
 
       <StreamForm />
-      <TokenFlow
-        selectedToken={"ETH"}
-        setSelectedToken={function (token: "ETH" | "USDC"): void {
-          throw new Error("Function not implemented.");
-        }}
-        balance={""}
-      />
+      <StreamList />
       <Footer />
     </div>
   );

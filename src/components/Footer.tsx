@@ -3,7 +3,6 @@
 import { useState } from "react";
 
 export function Footer() {
-  const [showFaucetTooltip, setShowFaucetTooltip] = useState(false);
   const [showWrapTooltip, setShowWrapTooltip] = useState(false);
 
   return (
@@ -25,14 +24,6 @@ export function Footer() {
           alignItems: "center",
         }}
       >
-        <FooterIcon
-          href="https://www.alchemy.com/faucets/base-sepolia"
-          emoji="🚰"
-          tooltip={showFaucetTooltip}
-          setTooltip={setShowFaucetTooltip}
-          tooltipText="Get Base Sepolia ETH from the faucet. You need this for transaction gas fees."
-          title="Get Base Sepolia ETH"
-        />
         <FooterIcon
           href="https://app.superfluid.finance/wrap?upgrade"
           emoji="🔄"

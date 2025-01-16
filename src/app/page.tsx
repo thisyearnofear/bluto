@@ -1,11 +1,11 @@
 "use client";
 
 import { ConnectKitButton } from "connectkit";
-import { Web3Provider } from "@/components/Web3Provider";
 import { StreamForm } from "@/components/StreamForm";
 import { Footer } from "@/components/Footer";
+import { TokenFlow } from "@/components/TokenFlow";
 
-function BlutoApp() {
+export default function BlutoApp() {
   return (
     <div
       style={{
@@ -13,40 +13,65 @@ function BlutoApp() {
         margin: "auto",
         padding: "20px",
         textAlign: "center",
-        width: "100%",
       }}
     >
       <h1
         style={{
           fontSize: "clamp(24px, 5vw, 28px)",
           fontWeight: "bold",
-          marginBottom: "clamp(20px, 5vh, 40px)",
+          marginBottom: "10px",
         }}
       >
         Bluto
       </h1>
 
+      <h3
+        style={{
+          fontSize: "clamp(16px, 3vw, 18px)",
+          marginBottom: "20px",
+          color: "#666",
+          fontWeight: "normal",
+        }}
+      >
+        Base | Superfluid
+      </h3>
+
+      <p
+        style={{
+          fontSize: "14px",
+          color: "#666",
+          marginBottom: "40px",
+          padding: "0 20px",
+          lineHeight: "1.5",
+        }}
+      >
+        Stream ETHx tokens continuously to any address.
+        <br />
+        • Pay contributors or team members
+        <br />
+        • Subscription services
+        <br />• Regular payments to friends/family
+      </p>
+
       <div
         style={{
           display: "flex",
           justifyContent: "center",
-          marginBottom: "clamp(20px, 5vh, 40px)",
-          padding: "0 10px",
+          marginBottom: "40px",
         }}
       >
         <ConnectKitButton />
       </div>
 
       <StreamForm />
+      <TokenFlow
+        selectedToken={"ETH"}
+        setSelectedToken={function (token: "ETH" | "USDC"): void {
+          throw new Error("Function not implemented.");
+        }}
+        balance={""}
+      />
       <Footer />
     </div>
-  );
-}
-
-export default function Page() {
-  return (
-    <Web3Provider>
-      <BlutoApp />
-    </Web3Provider>
   );
 }

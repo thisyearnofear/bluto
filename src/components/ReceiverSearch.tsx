@@ -11,20 +11,18 @@ export function ReceiverSearch({ onSelect }: ReceiverSearchProps) {
   const [input, setInput] = useState("");
   const [platform, setPlatform] = useState<Platform>("address");
   const [searchTerm, setSearchTerm] = useState("");
+  const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
   const { profile, loading, error } = useNameResolution(searchTerm, platform);
 
   const handleSearch = () => {
     if (!input) return;
-
-    if (platform === "address" && !ethers.utils.isAddress(input)) {
-      return;
-    }
-
+    if (platform === "address" && !ethers.utils.isAddress(input)) return;
     setSearchTerm(input);
   };
 
   const handleSelect = () => {
     if (profile?.address) {
+      setSelectedAddress(profile.address);
       onSelect(profile.address);
     }
   };
@@ -68,7 +66,6 @@ export function ReceiverSearch({ onSelect }: ReceiverSearchProps) {
       </div>
 
       {loading && <div>Searching...</div>}
-
       {error && <div style={{ color: "red" }}>{error}</div>}
 
       {profile && (
@@ -77,11 +74,18 @@ export function ReceiverSearch({ onSelect }: ReceiverSearchProps) {
           style={{
             marginTop: "5px",
             padding: "10px",
-            backgroundColor: "#f5f5f5",
+            backgroundColor:
+              selectedAddress === profile.address
+                ? "rgba(76, 175, 80, 0.1)"
+                : "#f5f5f5",
+            border: `2px solid ${
+              selectedAddress === profile.address ? "#4CAF50" : "transparent"
+            }`,
             borderRadius: "5px",
             cursor: "pointer",
             display: "flex",
             alignItems: "center",
+            transition: "all 0.2s ease",
           }}
         >
           {profile.avatar && (
@@ -96,7 +100,7 @@ export function ReceiverSearch({ onSelect }: ReceiverSearchProps) {
               }}
             />
           )}
-          <div>
+          <div style={{ flex: 1 }}>
             {profile.displayName && (
               <div style={{ fontWeight: "bold" }}>{profile.displayName}</div>
             )}
@@ -104,6 +108,17 @@ export function ReceiverSearch({ onSelect }: ReceiverSearchProps) {
               {profile.address}
             </div>
           </div>
+          {selectedAddress === profile.address && (
+            <div
+              style={{
+                color: "#4CAF50",
+                marginLeft: "10px",
+                fontSize: "20px",
+              }}
+            >
+              ✓
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -1,14 +1,15 @@
 "use client";
 
-import { useState, ChangeEvent } from "react";
+import { useState, ChangeEvent, useEffect } from "react";
 import { useAccount, useWalletClient } from "wagmi";
 import { ethers } from "ethers";
-import { CONTRACTS, MINIMUM_FLOW_RATE } from "@/constants/contracts";
+import { base } from "wagmi/chains";
+import { CONTRACTS } from "@/constants/contracts";
 import { CFA_FORWARDER_ABI } from "@/constants/abis/CFAForwarder";
 import { ETHx_ABI } from "@/constants/abis/ETHx";
 import { FlowRateInput } from "./FlowRateInput";
 import { ReceiverSearch } from "./ReceiverSearch";
-import { InfoTooltip } from "./InfoTooltip";
+import { TokenFlow } from "./TokenFlow";
 
 export function StreamForm() {
   const { address, isConnected } = useAccount();
@@ -18,6 +19,9 @@ export function StreamForm() {
   const [txHash, setTxHash] = useState<string>("");
   const { data: walletClient } = useWalletClient();
   const [copied, setCopied] = useState(false);
+  const [chainError, setChainError] = useState(false);
+  const [selectedToken, setSelectedToken] = useState<"ETH" | "USDC">("ETH");
+  const [balance, setBalance] = useState<string>("0");
 
   const handleReceiverAddressChange = (e: ChangeEvent<HTMLInputElement>) =>
     setReceiverAddress(e.target.value);
@@ -38,10 +42,10 @@ export function StreamForm() {
       return;
     }
 
-    // Check if we're on Base Sepolia
+    // Check if we're on Base Mainnet
     const chainId = await walletClient.getChainId();
-    if (chainId !== 84532) {
-      setMessage("Please switch to Base Sepolia network");
+    if (chainId !== base.id) {
+      setMessage("Please switch to Base Mainnet network");
       return;
     }
 
@@ -61,14 +65,15 @@ export function StreamForm() {
       const provider = new ethers.providers.Web3Provider(walletClient as any);
       const signer = provider.getSigner();
 
-      // Check ETHx balance
-      const ethxContract = new ethers.Contract(
-        CONTRACTS.ETHx,
-        ETHx_ABI,
-        signer
+      // Check token balance
+      const tokenAddress =
+        selectedToken === "ETH" ? CONTRACTS.ETHx : CONTRACTS.USDCx;
+      const tokenContract = new ethers.Contract(tokenAddress, ETHx_ABI, signer);
+      const balance = await tokenContract.balanceOf(address);
+      console.log(
+        `${selectedToken}x balance:`,
+        ethers.utils.formatUnits(balance, selectedToken === "USDC" ? 6 : 18)
       );
-      const balance = await ethxContract.balanceOf(address);
-      console.log("ETHx balance:", ethers.utils.formatEther(balance));
 
       // Create the stream
       const contract = new ethers.Contract(
@@ -79,13 +84,13 @@ export function StreamForm() {
 
       setMessage("Creating stream...");
       console.log("Creating stream with params:", {
-        token: CONTRACTS.ETHx,
+        token: tokenAddress,
         receiver: receiverAddress,
         flowRate: flowRate,
       });
 
       const tx = await contract.setFlowrate(
-        CONTRACTS.ETHx,
+        tokenAddress,
         receiverAddress,
         flowRate,
         {
@@ -131,7 +136,7 @@ export function StreamForm() {
     return (
       <div style={{ marginTop: "20px", textAlign: "center" }}>
         <a
-          href={`https://explorer.superfluid.finance/base-sepolia/accounts/${address}?tab=streams`}
+          href={`https://explorer.superfluid.finance/base/accounts/${address}?tab=streams`}
           target="_blank"
           rel="noopener noreferrer"
           style={{
@@ -144,7 +149,7 @@ export function StreamForm() {
         </a>
         {txHash && (
           <a
-            href={`https://sepolia.basescan.org/tx/${txHash}`}
+            href={`https://basescan.org/tx/${txHash}`}
             target="_blank"
             rel="noopener noreferrer"
             style={{ color: "blue", textDecoration: "underline" }}
@@ -156,57 +161,85 @@ export function StreamForm() {
     );
   };
 
+  useEffect(() => {
+    if (isConnected && walletClient) {
+      const checkChain = async () => {
+        const chainId = await walletClient.getChainId();
+        setChainError(chainId !== base.id);
+      };
+      checkChain();
+    }
+  }, [isConnected, walletClient]);
+
+  useEffect(() => {
+    if (isConnected && walletClient && address) {
+      const checkBalance = async () => {
+        try {
+          const provider = new ethers.providers.Web3Provider(
+            walletClient as any
+          );
+          const tokenContract = new ethers.Contract(
+            selectedToken === "ETH" ? CONTRACTS.ETHx : CONTRACTS.USDCx,
+            ETHx_ABI,
+            provider
+          );
+
+          // Use realtimeBalanceOf instead of balanceOf for Super Tokens
+          const [availableBalance] = await tokenContract.realtimeBalanceOf(
+            address
+          );
+          setBalance(
+            ethers.utils.formatUnits(
+              availableBalance.toString(),
+              selectedToken === "USDC" ? 6 : 18
+            )
+          );
+        } catch (error) {
+          console.error("Error checking balance:", error);
+          setBalance("0");
+        }
+      };
+      checkBalance();
+    }
+  }, [isConnected, walletClient, address, selectedToken]);
+
   if (!isConnected) return null;
 
   return (
     <div className="stream-form" style={{ padding: "0 10px" }}>
-      <div style={{ marginBottom: "clamp(15px, 3vh, 20px)" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "8px",
-          }}
-        >
-          <span style={{ opacity: 0.7 }}>Token:</span>
-          <button
-            onClick={handleCopyAddress}
-            style={{
-              padding: "10px",
-              textAlign: "center",
-              backgroundColor: "#f5f5f5",
-              border: "none",
-              borderRadius: "4px",
-              color: "#666",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
-            }}
-          >
-            ETHx
-            {copied ? (
-              <span style={{ fontSize: "12px", color: "green" }}>✓</span>
-            ) : (
-              <span style={{ fontSize: "12px", opacity: 0.5 }}>📋</span>
-            )}
-          </button>
-        </div>
-      </div>
+      {chainError && (
+        <p style={{ color: "red", marginBottom: "20px" }}>
+          Please switch to Base Mainnet network
+        </p>
+      )}
 
-      <h2 style={{ fontSize: "20px", fontWeight: "bold" }}>Create Stream</h2>
+      <TokenFlow
+        selectedToken={selectedToken}
+        setSelectedToken={setSelectedToken}
+        balance={balance}
+      />
+
+      <h2
+        style={{
+          fontSize: "20px",
+          fontWeight: "bold",
+          marginTop: "30px",
+          marginBottom: "20px",
+        }}
+      >
+        Create Stream
+      </h2>
 
       <ReceiverSearch onSelect={setReceiverAddress} />
 
       <div style={{ margin: "20px 0" }}>
-        <FlowRateInput onChange={setFlowRate} />
+        <FlowRateInput onChange={setFlowRate} selectedToken={selectedToken} />
       </div>
 
       <button
         onClick={createStream}
         style={{
-          backgroundColor: "green",
+          backgroundColor: "#4CAF50",
           color: "white",
           padding: "clamp(8px, 2vh, 12px)",
           borderRadius: "5px",
@@ -214,13 +247,25 @@ export function StreamForm() {
           cursor: "pointer",
           width: "100%",
           fontSize: "clamp(14px, 4vw, 16px)",
+          opacity: !isConnected || chainError ? 0.5 : 1,
         }}
+        disabled={!isConnected || chainError}
       >
         Create Stream
       </button>
 
       {message && (
-        <p style={{ marginTop: "20px", textAlign: "center" }}>{message}</p>
+        <p
+          style={{
+            marginTop: "20px",
+            textAlign: "center",
+            padding: "10px",
+            background: "#f5f5f5",
+            borderRadius: "4px",
+          }}
+        >
+          {message}
+        </p>
       )}
 
       {getStreamLinks()}

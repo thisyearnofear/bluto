@@ -4,12 +4,16 @@ import {
   useCallback,
   forwardRef,
   useImperativeHandle,
+  ForwardedRef,
 } from "react";
 import { useAccount, useWalletClient } from "wagmi";
 import { ethers } from "ethers";
 import { base } from "wagmi/chains";
 import { CONTRACTS } from "@/constants/contracts";
 import { CFA_FORWARDER_ABI } from "@/constants/abis/CFAForwarder";
+import { Framework } from "@superfluid-finance/sdk-core";
+import { ETHx_ABI } from "@/constants/abis/ETHx";
+import { ERC20_ABI } from "@/constants/abis/ERC20";
 
 // Constants
 const BASE_SEPOLIA_RPC = "https://sepolia.base.org";
@@ -19,22 +23,9 @@ const RPC_ENDPOINTS = [
   "https://1rpc.io/base",
   "https://base.meowrpc.com",
 ];
+const STORAGE_KEY = "conditional_streams_v1";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const getWorkingProvider = async () => {
-  for (const rpc of RPC_ENDPOINTS) {
-    try {
-      const provider = new ethers.providers.JsonRpcProvider(rpc);
-      await provider.getBlockNumber(); // Test the connection
-      return provider;
-    } catch (error) {
-      console.warn(`RPC ${rpc} failed, trying next one...`);
-      continue;
-    }
-  }
-  throw new Error("No working RPC endpoint found");
-};
 
 const withRetry = async <T,>(
   operation: () => Promise<T>,
@@ -83,15 +74,23 @@ interface Conditions {
   timeframeInMinutes: number;
 }
 
+interface ActivityCheck {
+  timestamp: number;
+  completed: boolean;
+}
+
 interface ConditionalStream {
+  id: string;
   token: string;
   receiver: string;
   flowRate: string;
   tokenSymbol: string;
   lastActivity?: FitnessScore;
-  stopTxHash?: string;
   isActive: boolean;
   conditions: Conditions;
+  activityHistory: ActivityCheck[];
+  missedCount: number;
+  isStoppingStream?: boolean;
 }
 
 export interface ConditionalStreamListRef {
@@ -103,8 +102,47 @@ export interface ConditionalStreamListRef {
   ) => Promise<void>;
 }
 
-export const ConditionalStreamList = forwardRef<ConditionalStreamListRef>(
+// Add helper for time formatting
+const formatTimeRemaining = (
+  timeframeInMinutes: number,
+  lastActivityTimestamp: number
+) => {
+  const timeframeMs = timeframeInMinutes * 60 * 1000;
+  const timeSinceLastActivity = Date.now() - lastActivityTimestamp * 1000;
+  const timeRemaining = Math.max(0, timeframeMs - timeSinceLastActivity);
+
+  const minutes = Math.floor(timeRemaining / (1000 * 60));
+  const seconds = Math.floor((timeRemaining % (1000 * 60)) / 1000);
+
+  return `${minutes}m ${seconds}s`;
+};
+
+// Remove the global style injection
+const styles = `
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+`;
+
+export const ConditionalStreamList = forwardRef<ConditionalStreamListRef, {}>(
   (_, ref) => {
+    // Add useEffect for style injection
+    useEffect(() => {
+      // Only run in browser environment
+      if (typeof window !== "undefined") {
+        const styleSheet = document.createElement("style");
+        styleSheet.type = "text/css";
+        styleSheet.innerText = styles;
+        document.head.appendChild(styleSheet);
+
+        // Cleanup
+        return () => {
+          document.head.removeChild(styleSheet);
+        };
+      }
+    }, []);
+
     const { address, isConnected } = useAccount();
     const { data: walletClient } = useWalletClient();
     const [streams, setStreams] = useState<ConditionalStream[]>([]);
@@ -120,20 +158,23 @@ export const ConditionalStreamList = forwardRef<ConditionalStreamListRef>(
     );
 
     // Fetch user's fitness activity
-    const fetchFitnessActivity = useCallback(async (userAddress: string) => {
-      try {
-        const score = await fitnessContract.getUserScore(userAddress);
-        return {
-          user: score.user,
-          pushups: Number(score.pushups),
-          squats: Number(score.squats),
-          timestamp: Number(score.timestamp),
-        };
-      } catch (error) {
-        console.error("Error fetching fitness activity:", error);
-        return null;
-      }
-    }, []);
+    const fetchFitnessActivity = useCallback(
+      async (userAddress: string) => {
+        try {
+          const score = await fitnessContract.getUserScore(userAddress);
+          return {
+            user: score.user,
+            pushups: Number(score.pushups),
+            squats: Number(score.squats),
+            timestamp: Number(score.timestamp),
+          };
+        } catch (error) {
+          console.error("Error fetching fitness activity:", error);
+          return null;
+        }
+      },
+      [fitnessContract]
+    );
 
     // Check if user has met requirements
     const checkRequirements = useCallback(
@@ -185,43 +226,51 @@ export const ConditionalStreamList = forwardRef<ConditionalStreamListRef>(
       return () => {
         fitnessContract.off(filter, listener);
       };
+    }, [streams, fitnessContract]);
+
+    // Load streams from localStorage on mount
+    useEffect(() => {
+      const savedStreams = localStorage.getItem(STORAGE_KEY);
+      if (savedStreams) {
+        setStreams(JSON.parse(savedStreams));
+      }
+    }, []);
+
+    // Save streams to localStorage when they change
+    useEffect(() => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(streams));
     }, [streams]);
 
-    // Monitor streams and stop if requirements aren't met
-    useEffect(() => {
-      const checkInterval = setInterval(async () => {
-        for (const stream of streams) {
-          if (!stream.isActive) continue;
+    // Add helper to check activity history
+    const updateActivityHistory = useCallback(
+      (stream: ConditionalStream) => {
+        const now = Date.now();
+        const timeframeMs = stream.conditions.timeframeInMinutes * 60 * 1000;
+        const lastCheck =
+          stream.activityHistory[stream.activityHistory.length - 1]
+            ?.timestamp || 0;
 
-          const activity = await fetchFitnessActivity(stream.receiver);
-          const meetsRequirements = checkRequirements(
-            activity,
-            stream.conditions
-          );
+        // Only check if enough time has passed since last check
+        if (now - lastCheck < timeframeMs) return stream;
 
-          if (!meetsRequirements && stream.stopTxHash) {
-            try {
-              // Execute the pre-signed stop transaction
-              const provider = new ethers.providers.JsonRpcProvider(
-                BASE_SEPOLIA_RPC
-              );
-              await provider.sendTransaction(stream.stopTxHash);
+        const completed = checkRequirements(
+          stream.lastActivity || null,
+          stream.conditions
+        );
+        const newHistory = [
+          ...stream.activityHistory,
+          { timestamp: now, completed },
+        ];
+        const missedCount = newHistory.filter((h) => !h.completed).length;
 
-              // Update stream status
-              setStreams((current) =>
-                current.map((s) =>
-                  s.receiver === stream.receiver ? { ...s, isActive: false } : s
-                )
-              );
-            } catch (error) {
-              console.error("Failed to stop stream:", error);
-            }
-          }
-        }
-      }, 60000); // Check every minute
-
-      return () => clearInterval(checkInterval);
-    }, [streams, checkRequirements, fetchFitnessActivity]);
+        return {
+          ...stream,
+          activityHistory: newHistory.slice(-5), // Keep last 5 checks
+          missedCount,
+        };
+      },
+      [checkRequirements]
+    );
 
     // Create a new conditional stream
     const createConditionalStream = async (
@@ -247,64 +296,144 @@ export const ConditionalStreamList = forwardRef<ConditionalStreamListRef>(
           return;
         }
 
-        // Create stream using CFA Forwarder with retry logic
-        const contract = new ethers.Contract(
-          CONTRACTS.CFAForwarder,
-          CFA_FORWARDER_ABI,
-          signer
+        // Initialize Superfluid Framework
+        setMessage("Initializing Superfluid...");
+        const sf = await Framework.create({
+          chainId: base.id,
+          provider: provider,
+        });
+
+        // Check token balance with retry
+        const tokenContract = new ethers.Contract(token, ETHx_ABI, signer);
+        const erc20Contract = new ethers.Contract(token, ERC20_ABI, signer);
+
+        const balance = await withRetry(async () =>
+          tokenContract.balanceOf(address)
+        );
+        console.log(
+          `Token balance:`,
+          ethers.utils.formatUnits(
+            balance,
+            token.toLowerCase().includes("usdc") ? 6 : 18
+          )
         );
 
+        // Get the superToken contract
+        const superToken = await sf.loadSuperToken(token);
+        const tokenSymbol = await superToken.symbol({
+          providerOrSigner: provider,
+        });
+
+        // Check and handle approvals
+        setMessage("Checking approvals...");
+        const hostAddress = await sf.settings.config.hostAddress;
+
+        // First check if we have enough allowance
+        const currentAllowance = await erc20Contract.allowance(
+          address!,
+          hostAddress
+        );
+        console.log(
+          "Current allowance:",
+          ethers.utils.formatUnits(
+            currentAllowance,
+            token.toLowerCase().includes("usdc") ? 6 : 18
+          )
+        );
+
+        // Calculate required allowance based on flow rate
+        const requiredAllowance = ethers.utils.parseUnits(
+          "1000",
+          token.toLowerCase().includes("usdc") ? 6 : 18
+        );
+        console.log(
+          "Required allowance:",
+          ethers.utils.formatUnits(
+            requiredAllowance,
+            token.toLowerCase().includes("usdc") ? 6 : 18
+          )
+        );
+
+        if (currentAllowance.lt(requiredAllowance)) {
+          setMessage("Approving Superfluid host contract...");
+          const approveTx = await withRetry(async () =>
+            erc20Contract.approve(hostAddress, ethers.constants.MaxUint256)
+          );
+          await approveTx.wait(1);
+          console.log("Approval confirmed");
+        } else {
+          console.log("Sufficient allowance already exists");
+        }
+
+        // Now authorize the flow
+        setMessage("Authorizing flow...");
+        const authorizeOperation =
+          superToken.authorizeFlowOperatorWithFullControl({
+            flowOperator: hostAddress,
+          });
+
+        const authTx = await withRetry(async () => {
+          return await authorizeOperation.exec(signer);
+        });
+        await authTx.wait(1);
+        console.log("Flow authorization confirmed");
+
+        // Create the stream
+        setMessage("Creating stream...");
         console.log("Creating stream with params:", {
           token,
           receiver,
           flowRate,
         });
 
-        // Create the stream with retry logic
+        const createFlowOperation = superToken.createFlow({
+          sender: address!,
+          receiver: receiver,
+          flowRate: flowRate,
+          overrides: {
+            gasLimit: 3000000,
+          },
+        });
+
         const tx = await withRetry(async () => {
-          const transaction = await contract.setFlowrate(
-            token,
-            receiver,
-            flowRate,
-            {
-              gasLimit: 3000000,
-            }
-          );
-          return transaction;
+          return await createFlowOperation.exec(signer);
         });
 
         setMessage("Waiting for confirmation...");
-        const receipt = await tx.wait(2);
+        await tx.wait();
 
-        if (receipt.status === 0) {
+        // Add delay before verification
+        await delay(5000);
+
+        const flow = await sf.cfaV1.getFlow({
+          superToken: token,
+          sender: address!,
+          receiver: receiver,
+          providerOrSigner: provider,
+        });
+
+        if (flow.flowRate === "0") {
           throw new Error(
-            "Transaction failed. Check the explorer for more details."
+            "Stream was not created successfully. Flow rate is 0."
           );
         }
 
-        // Pre-sign a stop transaction
-        const stopTx = await withRetry(() =>
-          contract.populateTransaction.setFlowrate(token, receiver, 0, {
-            gasLimit: 3000000,
-          })
-        );
-        const stopTxData = await signer.signTransaction(stopTx);
-
-        // Add to conditional streams list
+        // Add to conditional streams list with unique ID
         const activity = await fetchFitnessActivity(receiver);
+        const streamId = `${Date.now()}-${token}-${receiver}`;
         setStreams((current) => [
           ...current,
           {
+            id: streamId,
             token,
             receiver,
             flowRate,
-            tokenSymbol: token.toLowerCase().includes("ethx")
-              ? "ETHx"
-              : "USDCx",
+            tokenSymbol,
             lastActivity: activity || undefined,
-            stopTxHash: stopTxData,
             isActive: true,
             conditions,
+            activityHistory: [],
+            missedCount: 0,
           },
         ]);
 
@@ -325,6 +454,60 @@ export const ConditionalStreamList = forwardRef<ConditionalStreamListRef>(
     useImperativeHandle(ref, () => ({
       createConditionalStream,
     }));
+
+    // Add after other useEffects
+    useEffect(() => {
+      // Update activity history every minute
+      const updateInterval = setInterval(() => {
+        setStreams((current) =>
+          current.map((stream) => {
+            if (!stream.isActive) return stream;
+            return updateActivityHistory(stream);
+          })
+        );
+      }, 60000);
+
+      return () => clearInterval(updateInterval);
+    }, [updateActivityHistory]);
+
+    // Also update when new activity is detected
+    useEffect(() => {
+      if (!fitnessContract) return;
+
+      const filter = fitnessContract.filters.ScoreAdded();
+      const listener = async (
+        user: string,
+        pushups: ethers.BigNumber,
+        squats: ethers.BigNumber,
+        timestamp: ethers.BigNumber
+      ) => {
+        if (
+          streams.some((s) => s.receiver.toLowerCase() === user.toLowerCase())
+        ) {
+          const newScore = {
+            user,
+            pushups: Number(pushups),
+            squats: Number(squats),
+            timestamp: Number(timestamp),
+          };
+          setStreams((current) =>
+            current.map((stream) =>
+              stream.receiver.toLowerCase() === user.toLowerCase()
+                ? updateActivityHistory({
+                    ...stream,
+                    lastActivity: newScore,
+                  })
+                : stream
+            )
+          );
+        }
+      };
+
+      fitnessContract.on(filter, listener);
+      return () => {
+        fitnessContract.off(filter, listener);
+      };
+    }, [streams, fitnessContract, updateActivityHistory]);
 
     return (
       <div data-testid="conditional-stream-list" style={{ marginTop: "30px" }}>
@@ -353,7 +536,7 @@ export const ConditionalStreamList = forwardRef<ConditionalStreamListRef>(
         <div>
           {streams.map((stream) => (
             <div
-              key={`${stream.token}-${stream.receiver}`}
+              key={stream.id}
               style={{
                 padding: "16px",
                 marginBottom: "16px",
@@ -381,7 +564,12 @@ export const ConditionalStreamList = forwardRef<ConditionalStreamListRef>(
                   marginBottom: "8px",
                 }}
               >
-                Flow Rate: {stream.flowRate} {stream.tokenSymbol}/month
+                Flow Rate:{" "}
+                {ethers.utils.formatUnits(
+                  stream.flowRate,
+                  stream.tokenSymbol === "USDCx" ? 6 : 18
+                )}{" "}
+                {stream.tokenSymbol}/month
               </p>
 
               <p
@@ -415,25 +603,217 @@ export const ConditionalStreamList = forwardRef<ConditionalStreamListRef>(
                     {new Date(
                       stream.lastActivity.timestamp * 1000
                     ).toLocaleString()}
+                    <br />
+                    Time Remaining:{" "}
+                    {formatTimeRemaining(
+                      stream.conditions.timeframeInMinutes,
+                      stream.lastActivity.timestamp
+                    )}
                   </>
                 ) : (
                   "No activity"
                 )}
               </p>
 
-              <div>
-                <span
+              <div style={{ marginTop: "16px", marginBottom: "16px" }}>
+                <div
                   style={{
-                    display: "inline-block",
-                    padding: "4px 12px",
-                    borderRadius: "4px",
-                    fontSize: "12px",
-                    background: stream.isActive ? "#e3f2e6" : "#ffe5e5",
-                    color: stream.isActive ? "#2c682d" : "#c53030",
+                    marginBottom: "8px",
+                    fontSize: "14px",
+                    color: "#666",
                   }}
                 >
-                  {stream.isActive ? "Active" : "Stopped"}
-                </span>
+                  Activity History:
+                </div>
+                <div
+                  style={{ display: "flex", gap: "8px", alignItems: "center" }}
+                >
+                  {stream.activityHistory.map((check, index) => (
+                    <div
+                      key={check.timestamp}
+                      style={{
+                        width: "40px",
+                        height: "40px",
+                        borderRadius: "4px",
+                        background: check.completed ? "#e3f2e6" : "#ffe5e5",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "20px",
+                        color: check.completed ? "#2c682d" : "#c53030",
+                      }}
+                      title={`Check at ${new Date(
+                        check.timestamp
+                      ).toLocaleString()}`}
+                    >
+                      {check.completed ? "✓" : "✗"}
+                    </div>
+                  ))}
+                </div>
+                {stream.missedCount >= 2 && (
+                  <div
+                    style={{
+                      marginTop: "12px",
+                      padding: "8px 12px",
+                      borderRadius: "4px",
+                      background: "#dc3545",
+                      color: "white",
+                      fontSize: "14px",
+                      fontWeight: "500",
+                    }}
+                  >
+                    ⚠️ Recipient has missed {stream.missedCount} checks -
+                    Consider stopping the stream
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginTop: "12px" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: "12px",
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-block",
+                      padding: "4px 12px",
+                      borderRadius: "4px",
+                      fontSize: "12px",
+                      background: stream.isActive ? "#e3f2e6" : "#ffe5e5",
+                      color: stream.isActive ? "#2c682d" : "#c53030",
+                    }}
+                  >
+                    {stream.isActive ? "Active" : "Stopped"}
+                  </span>
+
+                  {stream.isActive &&
+                    !checkRequirements(
+                      stream.lastActivity || null,
+                      stream.conditions
+                    ) && (
+                      <div
+                        style={{
+                          background: "#fff3cd",
+                          padding: "8px 12px",
+                          borderRadius: "4px",
+                          fontSize: "12px",
+                          color: "#856404",
+                        }}
+                      >
+                        Conditions not met - Stream may be stopped
+                      </div>
+                    )}
+
+                  {stream.isActive && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          if (!walletClient) return;
+
+                          // Show confirmation modal
+                          const confirmed = window.confirm(
+                            `Are you sure you want to stop streaming ${ethers.utils.formatUnits(
+                              stream.flowRate,
+                              stream.tokenSymbol === "USDCx" ? 6 : 18
+                            )} ${stream.tokenSymbol}/month?`
+                          );
+
+                          if (!confirmed) return;
+
+                          // Update loading state for this specific stream
+                          setStreams((current) =>
+                            current.map((s) =>
+                              s.id === stream.id
+                                ? { ...s, isStoppingStream: true }
+                                : s
+                            )
+                          );
+
+                          const provider = new ethers.providers.Web3Provider(
+                            walletClient as any
+                          );
+                          const signer = provider.getSigner();
+                          const sf = await Framework.create({
+                            chainId: base.id,
+                            provider: provider,
+                          });
+
+                          const superToken = await sf.loadSuperToken(
+                            stream.token
+                          );
+                          const deleteFlowOperation = superToken.deleteFlow({
+                            sender: address!,
+                            receiver: stream.receiver,
+                          });
+
+                          const tx = await deleteFlowOperation.exec(signer);
+                          await tx.wait();
+
+                          setStreams((current) =>
+                            current.map((s) =>
+                              s.id === stream.id
+                                ? {
+                                    ...s,
+                                    isActive: false,
+                                    isStoppingStream: false,
+                                  }
+                                : s
+                            )
+                          );
+                        } catch (error) {
+                          console.error("Failed to stop stream:", error);
+                          // Reset loading state on error
+                          setStreams((current) =>
+                            current.map((s) =>
+                              s.id === stream.id
+                                ? { ...s, isStoppingStream: false }
+                                : s
+                            )
+                          );
+                        }
+                      }}
+                      disabled={stream.isStoppingStream}
+                      style={{
+                        padding: "4px 12px",
+                        borderRadius: "4px",
+                        fontSize: "12px",
+                        background: stream.isStoppingStream
+                          ? "#dc354580"
+                          : "#dc3545",
+                        color: "white",
+                        border: "none",
+                        cursor: stream.isStoppingStream
+                          ? "not-allowed"
+                          : "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                      }}
+                    >
+                      {stream.isStoppingStream ? (
+                        <>
+                          <div
+                            style={{
+                              width: "12px",
+                              height: "12px",
+                              border: "2px solid white",
+                              borderTopColor: "transparent",
+                              borderRadius: "50%",
+                              animation: "spin 1s linear infinite",
+                            }}
+                          />
+                          Stopping...
+                        </>
+                      ) : (
+                        "Stop Stream"
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))}

@@ -383,22 +383,23 @@ export function StreamForm() {
             provider
           );
 
-          // Use realtimeBalanceOf instead of balanceOf for Super Tokens
-          const [availableBalance] = await tokenContract.realtimeBalanceOf(
-            address
+          // Use balanceOf instead of realtimeBalanceOf
+          const balance = await tokenContract.balanceOf(address);
+          console.log("Raw balance:", balance.toString());
+          const formattedBalance = ethers.utils.formatUnits(
+            balance,
+            selectedToken === "USDC" ? 6 : 18
           );
-          setBalance(
-            ethers.utils.formatUnits(
-              availableBalance.toString(),
-              selectedToken === "USDC" ? 6 : 18
-            )
-          );
+          console.log("Formatted balance:", formattedBalance);
+          setBalance(formattedBalance);
         } catch (error) {
           console.error("Error checking balance:", error);
           setBalance("0");
         }
       };
       checkBalance();
+    } else {
+      setBalance("0");
     }
   }, [isConnected, walletClient, address, selectedToken]);
 

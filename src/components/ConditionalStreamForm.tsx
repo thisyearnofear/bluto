@@ -1,10 +1,11 @@
-import { useState } from "react";
-import { useAccount } from "wagmi";
+import { useState, useEffect } from "react";
+import { useAccount, useWalletClient } from "wagmi";
 import { ethers } from "ethers";
 import { FlowRateInput } from "./FlowRateInput";
 import { ReceiverSearch } from "./ReceiverSearch";
 import { TokenFlow } from "./TokenFlow";
 import { CONTRACTS } from "@/constants/contracts";
+import { ETHx_ABI } from "@/constants/abis/ETHx";
 
 interface ConditionalStreamFormProps {
   onSubmit: (
@@ -21,7 +22,8 @@ interface ConditionalStreamFormProps {
 export function ConditionalStreamForm({
   onSubmit,
 }: ConditionalStreamFormProps) {
-  const { isConnected } = useAccount();
+  const { address, isConnected } = useAccount();
+  const { data: walletClient } = useWalletClient();
   const [receiver, setReceiver] = useState("");
   const [flowRate, setFlowRate] = useState("");
   const [selectedToken, setSelectedToken] = useState<"ETH" | "USDC">("ETH");
@@ -29,6 +31,43 @@ export function ConditionalStreamForm({
   const [exerciseUnits, setExerciseUnits] = useState("50");
   const [timeframe, setTimeframe] = useState("1440"); // 24 hours in minutes
   const [error, setError] = useState("");
+  const [balance, setBalance] = useState("0");
+
+  // Fetch balance when token changes or wallet connects
+  useEffect(() => {
+    if (isConnected && walletClient && address) {
+      const fetchBalance = async () => {
+        try {
+          const provider = new ethers.providers.Web3Provider(
+            walletClient as any
+          );
+          const tokenAddress =
+            selectedToken === "ETH" ? CONTRACTS.ETHx : CONTRACTS.USDCx;
+          console.log("Fetching balance for token:", tokenAddress);
+
+          const tokenContract = new ethers.Contract(
+            tokenAddress,
+            ETHx_ABI,
+            provider
+          );
+
+          const balance = await tokenContract.balanceOf(address);
+          console.log("Raw balance:", balance.toString());
+          const decimals = selectedToken === "USDC" ? 6 : 18;
+          console.log("Using decimals:", decimals);
+          const formattedBalance = ethers.utils.formatUnits(balance, decimals);
+          console.log("Formatted balance:", formattedBalance);
+          setBalance(formattedBalance);
+        } catch (error) {
+          console.error("Error fetching balance:", error);
+          setBalance("0");
+        }
+      };
+      fetchBalance();
+    } else {
+      setBalance("0");
+    }
+  }, [isConnected, walletClient, address, selectedToken]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -78,7 +117,7 @@ export function ConditionalStreamForm({
         <TokenFlow
           selectedToken={selectedToken}
           setSelectedToken={setSelectedToken}
-          balance="0"
+          balance={balance}
         />
       </div>
 

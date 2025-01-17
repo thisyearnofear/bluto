@@ -9,7 +9,9 @@ const config = createConfig(
   getDefaultConfig({
     chains: [base],
     transports: {
-      [base.id]: http("https://mainnet.base.org"),
+      [base.id]: http(
+        "https://base-mainnet.g.alchemy.com/v2/Tx9luktS3qyIwEKVtjnQrpq8t3MNEV-B"
+      ),
     },
     walletConnectProjectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID!,
     appName: "Bluto",

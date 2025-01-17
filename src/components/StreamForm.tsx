@@ -4,12 +4,99 @@ import { useState, ChangeEvent, useEffect } from "react";
 import { useAccount, useWalletClient } from "wagmi";
 import { ethers } from "ethers";
 import { base } from "wagmi/chains";
+import { Framework } from "@superfluid-finance/sdk-core";
 import { CONTRACTS } from "@/constants/contracts";
 import { CFA_FORWARDER_ABI } from "@/constants/abis/CFAForwarder";
 import { ETHx_ABI } from "@/constants/abis/ETHx";
+import { ERC20_ABI } from "@/constants/abis/ERC20";
 import { FlowRateInput } from "./FlowRateInput";
 import { ReceiverSearch } from "./ReceiverSearch";
 import { TokenFlow } from "./TokenFlow";
+
+const RPC_ENDPOINTS = [
+  "https://base-mainnet.g.alchemy.com/v2/Tx9luktS3qyIwEKVtjnQrpq8t3MNEV-B",
+  "https://base.rpc.thirdweb.com/b9a142d988a6e40baa7342b423bf2361",
+  "https://base.blockpi.network/v1/rpc/public",
+  "https://1rpc.io/base",
+  "https://base.meowrpc.com",
+  "https://mainnet.base.org",
+];
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const withRetry = async <T,>(
+  operation: () => Promise<T>,
+  maxAttempts = 3,
+  delayMs = 1000
+): Promise<T> => {
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      if (
+        error?.message?.includes("429") ||
+        error?.error?.message?.includes("429")
+      ) {
+        console.log(
+          `Rate limit hit, attempt ${attempt}/${maxAttempts}, waiting ${delayMs}ms...`
+        );
+        await delay(delayMs);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+};
+
+let currentRpcIndex = 0;
+
+const getWorkingProvider = async (walletClient: any) => {
+  const startIndex = currentRpcIndex;
+
+  do {
+    const rpc = RPC_ENDPOINTS[currentRpcIndex];
+    try {
+      const provider = new ethers.providers.JsonRpcProvider(rpc);
+      await provider.getBlockNumber(); // Test the connection
+      console.log(`Using RPC endpoint: ${rpc}`);
+
+      // Override the provider's send method to use our RPC
+      const customProvider = new ethers.providers.Web3Provider(walletClient);
+      const originalSend = customProvider.send.bind(customProvider);
+      customProvider.send = async (method, params) => {
+        try {
+          return await originalSend(method, params);
+        } catch (error: any) {
+          if (error?.message?.includes("429")) {
+            console.log("Rate limit hit, cycling to next RPC...");
+            // Move to next RPC
+            currentRpcIndex = (currentRpcIndex + 1) % RPC_ENDPOINTS.length;
+            const nextProvider = new ethers.providers.JsonRpcProvider(
+              RPC_ENDPOINTS[currentRpcIndex]
+            );
+            console.log(
+              `Switched to RPC endpoint: ${RPC_ENDPOINTS[currentRpcIndex]}`
+            );
+            return await nextProvider.send(method, params);
+          }
+          throw error;
+        }
+      };
+
+      return customProvider;
+    } catch (error) {
+      console.warn(`RPC ${rpc} failed, trying next one...`);
+      currentRpcIndex = (currentRpcIndex + 1) % RPC_ENDPOINTS.length;
+      // If we've tried all RPCs, throw error
+      if (currentRpcIndex === startIndex) {
+        throw new Error("All RPC endpoints failed");
+      }
+    }
+  } while (true);
+};
 
 export function StreamForm() {
   const { address, isConnected } = useAccount();
@@ -42,46 +129,101 @@ export function StreamForm() {
       return;
     }
 
-    // Check if we're on Base Mainnet
-    const chainId = await walletClient.getChainId();
-    if (chainId !== base.id) {
-      setMessage("Please switch to Base Mainnet network");
+    // Add validation for recipient address
+    if (!receiverAddress || !ethers.utils.isAddress(receiverAddress)) {
+      setMessage("Please enter a valid recipient address");
       return;
     }
 
-    // Add validation
-    if (!ethers.utils.isAddress(receiverAddress)) {
-      setMessage("Please enter a valid receiver address");
-      return;
-    }
-
-    if (!flowRate || isNaN(Number(flowRate))) {
-      setMessage("Please select a valid flow rate");
+    // Add validation to prevent self-streaming
+    if (receiverAddress.toLowerCase() === address?.toLowerCase()) {
+      setMessage("You cannot create a stream to yourself");
       return;
     }
 
     try {
-      setMessage("Checking approval...");
-      const provider = new ethers.providers.Web3Provider(walletClient as any);
+      // Check if we're on Base mainnet
+      const chainId = await walletClient.getChainId();
+      if (chainId !== base.id) {
+        setMessage("Please switch to Base Mainnet network");
+        return;
+      }
+
+      setMessage("Initializing Superfluid...");
+      const provider = await getWorkingProvider(walletClient);
       const signer = provider.getSigner();
 
-      // Check token balance
+      // Initialize Superfluid Framework
+      const sf = await Framework.create({
+        chainId: base.id,
+        provider: provider,
+      });
+
+      // Check token balance with retry
       const tokenAddress =
         selectedToken === "ETH" ? CONTRACTS.ETHx : CONTRACTS.USDCx;
       const tokenContract = new ethers.Contract(tokenAddress, ETHx_ABI, signer);
-      const balance = await tokenContract.balanceOf(address);
+      const erc20Contract = new ethers.Contract(
+        tokenAddress,
+        ERC20_ABI,
+        signer
+      );
+
+      const balance = await withRetry(async () =>
+        tokenContract.balanceOf(address)
+      );
       console.log(
         `${selectedToken}x balance:`,
         ethers.utils.formatUnits(balance, selectedToken === "USDC" ? 6 : 18)
       );
 
-      // Create the stream
-      const contract = new ethers.Contract(
-        CONTRACTS.CFAForwarder,
-        CFA_FORWARDER_ABI,
-        signer
+      // Get the superToken contract
+      const superToken = await sf.loadSuperToken(tokenAddress);
+
+      // Check and handle approvals
+      setMessage("Checking approvals...");
+      const hostAddress = await sf.settings.config.hostAddress;
+
+      // First check if we have enough allowance
+      const currentAllowance = await erc20Contract.allowance(
+        address!,
+        hostAddress
+      );
+      console.log(
+        "Current allowance:",
+        ethers.utils.formatUnits(
+          currentAllowance,
+          selectedToken === "USDC" ? 6 : 18
+        )
       );
 
+      if (
+        currentAllowance.lt(
+          ethers.utils.parseUnits("1000", selectedToken === "USDC" ? 6 : 18)
+        )
+      ) {
+        setMessage("Approving Superfluid host contract...");
+        const approveTx = await withRetry(async () =>
+          erc20Contract.approve(hostAddress, ethers.constants.MaxUint256)
+        );
+        await approveTx.wait(1);
+        console.log("Approval confirmed");
+      }
+
+      // Now authorize the flow
+      setMessage("Authorizing flow...");
+      const authorizeOperation =
+        superToken.authorizeFlowOperatorWithFullControl({
+          flowOperator: hostAddress,
+        });
+
+      const authTx = await withRetry(async () => {
+        return await authorizeOperation.exec(signer);
+      });
+      await authTx.wait(1);
+      console.log("Flow authorization confirmed");
+
+      // Create the stream using Superfluid SDK
       setMessage("Creating stream...");
       console.log("Creating stream with params:", {
         token: tokenAddress,
@@ -89,29 +231,75 @@ export function StreamForm() {
         flowRate: flowRate,
       });
 
-      const tx = await contract.setFlowrate(
-        tokenAddress,
-        receiverAddress,
-        flowRate,
-        {
-          gasLimit: 3000000,
+      try {
+        // Create stream using Superfluid SDK
+        const createFlowOperation = superToken.createFlow({
+          sender: address!,
+          receiver: receiverAddress,
+          flowRate: flowRate,
+        });
+
+        const tx = await withRetry(async () => {
+          return await createFlowOperation.exec(signer);
+        });
+
+        console.log("Stream creation tx sent:", tx.hash);
+        setTxHash(tx.hash);
+
+        setMessage("Waiting for confirmation...");
+        await tx.wait();
+
+        // Add delay before verification
+        await delay(5000); // Wait 5 seconds for indexing
+
+        // Verify the stream was created using the SDK
+        const flow = await sf.cfaV1.getFlow({
+          superToken: tokenAddress,
+          sender: address!,
+          receiver: receiverAddress,
+          providerOrSigner: provider,
+        });
+
+        console.log("New flow info:", {
+          flowRate: flow.flowRate,
+          deposit: flow.deposit,
+          timestamp: flow.timestamp,
+        });
+
+        if (flow.flowRate === "0") {
+          throw new Error(
+            "Stream was not created successfully. Flow rate is 0."
+          );
         }
-      );
 
-      console.log("Stream creation tx sent:", tx.hash);
-      setTxHash(tx.hash);
+        setMessage("The stream has been created successfully!");
+      } catch (error: any) {
+        console.error("Detailed error:", {
+          error,
+          message: error.message,
+          reason: error.reason,
+          code: error.code,
+          data: error.data,
+          chainId: await walletClient.getChainId(),
+        });
 
-      setMessage("Waiting for confirmation...");
-      const receipt = await tx.wait(2);
-      console.log("Transaction status:", receipt.status);
-
-      if (receipt.status === 0) {
-        throw new Error(
-          "Transaction failed. Check the explorer for more details."
-        );
+        // More descriptive error messages
+        if (error.message?.includes("gas")) {
+          setMessage(
+            "Transaction failed: Gas estimation error. You may need to approve Superfluid first."
+          );
+        } else if (error.message?.includes("insufficient")) {
+          setMessage(
+            "Insufficient balance. Make sure you have enough ETHx and ETH for gas."
+          );
+        } else {
+          setMessage(
+            error.reason ||
+              error.message ||
+              "Failed to create stream. Please try again."
+          );
+        }
       }
-
-      setMessage("The stream has been created successfully!");
     } catch (error: any) {
       console.error("Detailed error:", {
         error,
@@ -122,11 +310,22 @@ export function StreamForm() {
         chainId: await walletClient.getChainId(),
       });
 
-      setMessage(
-        error.reason ||
-          error.message ||
-          "Failed to create stream. Please try again."
-      );
+      // More descriptive error messages
+      if (error.message?.includes("gas")) {
+        setMessage(
+          "Transaction failed: Gas estimation error. You may need to approve Superfluid first."
+        );
+      } else if (error.message?.includes("insufficient")) {
+        setMessage(
+          "Insufficient balance. Make sure you have enough ETHx and ETH for gas."
+        );
+      } else {
+        setMessage(
+          error.reason ||
+            error.message ||
+            "Failed to create stream. Please try again."
+        );
+      }
     }
   };
 
